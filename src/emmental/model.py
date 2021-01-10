@@ -254,9 +254,13 @@ class EmmentalModel(nn.Module):
 
         output_dict = dict(_input_=X_dict)
 
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
         # Call forward for each task
         for task_name in task_names:
             for action in self.task_flows[task_name]:
+                start.record()
                 if action["name"] not in output_dict:
                     if action["inputs"]:
                         try:
@@ -283,7 +287,10 @@ class EmmentalModel(nn.Module):
                     if not isinstance(output, list) and not isinstance(output, dict):
                         output = [output]
                     output_dict[action["name"]] = output
+                end.record()
+                torch.cuda.synchronize()
 
+                print(task_name, action["name"], start.elapsed_time(end))
         return output_dict
 
     def forward(  # type: ignore
