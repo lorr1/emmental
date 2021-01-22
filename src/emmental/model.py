@@ -51,6 +51,8 @@ class EmmentalModel(nn.Module):
         ] = dict()
         self.module_device: Dict[str, Union[int, str, torch.device]] = {}
         self.weights: Dict[str, float] = dict()
+        self.require_prob_for_evals: Dict[str, bool] = dict()
+        self.require_pred_for_evals: Dict[str, bool] = dict()
 
         # Build network with given tasks
         if tasks is not None:
@@ -173,6 +175,10 @@ class EmmentalModel(nn.Module):
         self.scorers[task.name] = task.scorer
         # Collect weight
         self.weights[task.name] = task.weight
+        # Collect require prob for eval
+        self.require_prob_for_evals[task.name] = task.require_prob_for_eval
+        # Collect require pred for eval
+        self.require_pred_for_evals[task.name] = task.require_pred_for_eval
 
         # Move model to specified device
         self._move_to_device()
@@ -201,6 +207,10 @@ class EmmentalModel(nn.Module):
         self.scorers[task.name] = task.scorer
         # Update weight
         self.weights[task.name] = task.weight
+        # Update require prob for eval
+        self.require_prob_for_evals[task.name] = task.require_prob_for_eval
+        # Update require pred for eval
+        self.require_pred_for_evals[task.name] = task.require_pred_for_eval
 
         # Move model to specified device
         self._move_to_device()
@@ -227,6 +237,8 @@ class EmmentalModel(nn.Module):
         del self.action_outputs[task_name]
         del self.scorers[task_name]
         del self.weights[task_name]
+        del self.require_prob_for_evals[task_name]
+        del self.require_pred_for_evals[task_name]
         # TODO: remove the modules only associate with that task
 
     def __repr__(self) -> str:
@@ -291,8 +303,8 @@ class EmmentalModel(nn.Module):
         X_dict: Dict[str, Any],
         Y_dict: Dict[str, Tensor],
         task_to_label_dict: Dict[str, str],
-        return_action_outputs=False,
         return_probs=True,
+        return_action_outputs=False,
     ) -> Union[
         Tuple[
             Dict[str, List[str]],
@@ -315,9 +327,9 @@ class EmmentalModel(nn.Module):
           X_dict: The input data.
           Y_dict: The output data.
           task_to_label_dict: The task to label mapping.
+          return_probs: Whether return prob not, defaults to True.
           return_action_outputs: Whether return action_outputs or not,
           defaults to False.
-          return_probs: Whether return prob not, defaults to True.
 
         Returns:
           The (active) uids, loss, prob, gold, action_output (optional) in the batch of
@@ -379,7 +391,7 @@ class EmmentalModel(nn.Module):
                             .numpy()
                         )
                     else:
-                        prob_dict = None
+                        prob_dict[task_name] = None
 
                     gold_dict[task_name] = Y_dict[label_name][active].cpu().numpy()
 
@@ -407,7 +419,7 @@ class EmmentalModel(nn.Module):
                         self.output_funcs[task_name](output_dict).cpu().detach().numpy()
                     )
                 else:
-                    prob_dict = None
+                    prob_dict[task_name] = None
 
                 if return_action_outputs and self.action_outputs[task_name] is not None:
                     for action_name, output_index in self.action_outputs[task_name]:
@@ -417,8 +429,8 @@ class EmmentalModel(nn.Module):
                             .detach()
                             .numpy()
                         )
-                loss_dict = None
-                gold_dict = None
+                loss_dict[task_name] = None
+                gold_dict[task_name] = None
 
         if return_action_outputs:
             return uid_dict, loss_dict, prob_dict, gold_dict, out_dict
@@ -429,17 +441,18 @@ class EmmentalModel(nn.Module):
     def predict(
         self,
         dataloader: EmmentalDataLoader,
-        return_preds: bool = False,
-        return_action_outputs: bool = True,
         return_probs: bool = True,
+        return_preds: bool = False,
+        return_action_outputs: bool = False,
     ) -> Dict[str, Any]:
         """Predict from dataloader.
 
         Args:
           dataloader: The dataloader to predict.
-          return_preds: Whether return predictions or not, defaults to False.
-          return_action_outputs: Whether return action_outputs or not, defaults to True.
           return_probs: Whether return prob not, defaults to True.
+          return_preds: Whether return predictions or not, defaults to False.
+          return_action_outputs: Whether return action_outputs or not,
+          defaults to False.
 
         Returns:
           The result dict.
@@ -490,7 +503,7 @@ class EmmentalModel(nn.Module):
                         Y_bdict,
                         task_to_label_dict,
                         return_action_outputs=return_action_outputs,
-                        return_probs=return_probs,
+                        return_probs=return_probs or return_preds,
                     )
                 else:
                     (
@@ -504,13 +517,15 @@ class EmmentalModel(nn.Module):
                         Y_bdict,
                         task_to_label_dict,
                         return_action_outputs=return_action_outputs,
-                        return_probs=return_probs,
+                        return_probs=return_probs or return_preds,
                     )
                     out_bdict = None
                 for task_name in uid_bdict.keys():
                     uid_dict[task_name].extend(uid_bdict[task_name])
                     if return_probs:
                         prob_dict[task_name].extend(prob_bdict[task_name])
+                    if return_preds:
+                        pred_dict[task_name].extend(prob_to_pred(prob_bdict[task_name]))
                     if dataloader.is_learnable:
                         gold_dict[task_name].extend(gold_bdict[task_name])
                         if len(loss_bdict[task_name].size()) == 0:
@@ -539,17 +554,17 @@ class EmmentalModel(nn.Module):
         res = {
             "uids": uid_dict,
             "golds": gold_dict,
-            "probs": prob_dict,
             "losses": loss_dict,
         }
 
+        if return_probs:
+            res["probs"] = prob_dict
+
+        if return_preds:
+            res["preds"] = pred_dict
+
         if return_action_outputs:
             res["outputs"] = out_dict
-
-        if return_preds and return_probs:
-            for task_name, prob in prob_dict.items():
-                pred_dict[task_name] = prob_to_pred(prob)
-            res["preds"] = pred_dict
 
         return res
 
@@ -587,12 +602,24 @@ class EmmentalModel(nn.Module):
                     f"continue..."
                 )
                 continue
-            predictions = self.predict(dataloader, return_preds=True)
+
+            return_probs = False
+            return_preds = False
+            for task_name in dataloader.task_to_label_dict:
+                return_probs = return_probs or self.require_prob_for_evals[task_name]
+                return_preds = return_preds or self.require_pred_for_evals[task_name]
+
+            predictions = self.predict(
+                dataloader,
+                return_probs=return_probs,
+                return_preds=return_preds,
+                return_action_outputs=False,
+            )
             for task_name in predictions["uids"].keys():
                 metric_score = self.scorers[task_name].score(
                     predictions["golds"][task_name],
-                    predictions["probs"][task_name],
-                    predictions["preds"][task_name],
+                    predictions["probs"][task_name] if return_probs else None,
+                    predictions["preds"][task_name] if return_preds else None,
                     predictions["uids"][task_name],
                 )
                 for metric_name, metric_value in metric_score.items():
